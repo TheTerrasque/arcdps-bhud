@@ -2,6 +2,12 @@ use crate::pubsub::dispatch;
 use arcdps_bindings::{cbtevent, Ag, AgOwned};
 use smol::Task;
 
+use crate::protos::eventdata::{
+    Actor, Affinity, BuffRemoveType, CombatActivation, CombatEvent, CombatMessage, CombatResult,
+    CombatType, Event, EventType, StateChange, WeaponSet, BuffDamageResult
+};
+use protobuf::ProtobufEnum;
+
 pub fn cbt(
     ev: Option<&cbtevent>,
     src: Option<&Ag>,
@@ -54,111 +60,165 @@ async fn cbt_with_type(
     revision: u64,
     indicator: u8,
 ) {
-    let mut message = Vec::new();
-    message.push(indicator); // indicator for local/area combat message
-    add_bytes(&mut message, ev, src, dst, skillname, id, revision);
-    dispatch(message).await;
-}
-
-fn add_bytes(
-    message: &mut Vec<u8>,
-    ev: Option<cbtevent>,
-    src: Option<AgOwned>,
-    dst: Option<AgOwned>,
-    skillname: Option<&str>,
-    id: u64,
-    revision: u64,
-) {
-    let mut messages = 0;
-    if let Some(ev) = ev {
-        messages |= 1;
-        let mut bytes = get_ev_bytes(&ev);
-        message.append(&mut bytes);
-    };
-    if let Some(ag) = src {
-        messages |= 1 << 1;
-        let mut bytes = get_ag_bytes(&ag);
-        message.append(&mut bytes);
-    };
-    if let Some(ag) = dst {
-        messages |= 1 << 2;
-        let mut bytes = get_ag_bytes(&ag);
-        message.append(&mut bytes);
-    };
-    if let Some(name) = skillname {
-        messages |= 1 << 3;
-        let bytes = name.as_bytes();
-        let mut bytes = [&bytes.len().to_le_bytes(), bytes].concat();
-        message.append(&mut bytes);
-    };
-    message.insert(1, messages);
-    message.append(&mut id.to_le_bytes().to_vec());
-    message.append(&mut revision.to_le_bytes().to_vec());
-}
-
-fn get_ev_bytes(ev: &cbtevent) -> Vec<u8> {
-    ev.time
-        .to_le_bytes()
-        .iter()
-        .chain(ev.src_agent.to_le_bytes().iter())
-        .chain(ev.dst_agent.to_le_bytes().iter())
-        .chain(ev.value.to_le_bytes().iter())
-        .chain(ev.buff_dmg.to_le_bytes().iter())
-        .chain(ev.overstack_value.to_le_bytes().iter())
-        .chain(ev.skillid.to_le_bytes().iter())
-        .chain(ev.src_instid.to_le_bytes().iter())
-        .chain(ev.dst_instid.to_le_bytes().iter())
-        .chain(ev.src_master_instid.to_le_bytes().iter())
-        .chain(ev.dst_master_instid.to_le_bytes().iter())
-        .chain(ev.iff.to_le_bytes().iter())
-        .chain(ev.buff.to_le_bytes().iter())
-        .chain(ev.result.to_le_bytes().iter())
-        .chain(ev.is_activation.to_le_bytes().iter())
-        .chain(ev.is_buffremove.to_le_bytes().iter())
-        .chain(ev.is_ninety.to_le_bytes().iter())
-        .chain(ev.is_fifty.to_le_bytes().iter())
-        .chain(ev.is_moving.to_le_bytes().iter())
-        .chain(ev.is_statechange.to_le_bytes().iter())
-        .chain(ev.is_flanking.to_le_bytes().iter())
-        .chain(ev.is_shields.to_le_bytes().iter())
-        .chain(ev.is_offcycle.to_le_bytes().iter())
-        .chain(ev.pad61.to_le_bytes().iter())
-        .chain(ev.pad62.to_le_bytes().iter())
-        .chain(ev.pad63.to_le_bytes().iter())
-        .chain(ev.pad64.to_le_bytes().iter())
-        .cloned()
-        .collect::<Vec<u8>>()
-}
-
-fn get_ag_bytes(ag: &AgOwned) -> Vec<u8> {
-    let (string_length, name_bytes) = if let Some(name) = &ag.name {
-        let bytes = name.as_bytes();
-        (bytes.len(), Some(bytes))
-    } else {
-        (0, None)
-    };
-    if let Some(name_bytes) = name_bytes {
-        string_length
-            .to_le_bytes()
-            .iter()
-            .chain(name_bytes.iter())
-            .chain(ag.id.to_le_bytes().iter())
-            .chain(ag.prof.to_le_bytes().iter())
-            .chain(ag.elite.to_le_bytes().iter())
-            .chain(ag.self_.to_le_bytes().iter())
-            .chain(ag.team.to_le_bytes().iter())
-            .cloned()
-            .collect()
-    } else {
-        string_length
-            .to_le_bytes()
-            .iter()
-            .chain(ag.id.to_le_bytes().iter())
-            .chain(ag.prof.to_le_bytes().iter())
-            .chain(ag.elite.to_le_bytes().iter())
-            .chain(ag.self_.to_le_bytes().iter())
-            .chain(ag.team.to_le_bytes().iter())
-            .cloned()
-            .collect()
+    let mut event = Event::new();
+    let mut combatmessage = CombatMessage::new();
+    if ev.is_some() {
+        combatmessage.set_combat_event(get_ev_proto(&ev.unwrap()));
     }
+    if indicator == 2 {
+        combatmessage.set_combat_type(CombatType::Area);
+    } else {
+        combatmessage.set_combat_type(CombatType::Local);
+    }
+    if src.is_some() {
+        combatmessage.set_src_actor(get_actor_proto(&src.unwrap()));
+    }
+
+    if dst.is_some() {
+        combatmessage.set_dst_actor(get_actor_proto(&dst.unwrap()));
+    }
+
+    combatmessage.skillname = skillname.unwrap_or("").to_string();
+    combatmessage.id = id;
+    combatmessage.revision = revision;
+
+    event.set_combat_message(combatmessage);
+    //message.push(indicator); // indicator for local/area combat message
+    //add_bytes(&mut message, ev, src, dst, skillname, id, revision);
+    dispatch(protobuf::Message::write_to_bytes(&event).unwrap()).await;
+}
+
+fn get_actor_proto(actor: &AgOwned) -> Actor {
+    let mut proto = Actor::new();
+    if actor.name.is_some() {
+        proto.name = actor.name.as_ref().unwrap().to_string();
+    };
+    proto.is_player = actor.self_ == 1;
+    proto.id = actor.id as u32;
+    proto.Profession = actor.prof;
+    if actor.elite != 0xffffffff {
+        proto.EliteSpec = actor.elite;
+    }
+    proto
+}
+
+// Reference: https://www.deltaconnected.com/arcdps/evtc/README.txt
+fn get_ev_proto(ev: &cbtevent) -> CombatEvent {
+    let mut proto = CombatEvent::new();
+    proto.time = ev.time;
+
+    proto.shield_damage = ev.overstack_value;
+    proto.skillid = ev.skillid;
+    proto.src_instid = ev.src_instid as u32;
+    proto.dst_instid = ev.dst_instid as u32;
+    proto.src_master_instid = ev.src_master_instid as u32;
+
+    proto.friend_or_foe = Affinity::from_i32((ev.iff+1) as i32).unwrap_or(Affinity::AF_Unparsed);
+    //proto.buff =  BuffType::from_i32(ev.buff as i32).unwrap_or(BuffType::BT_UNPARSED);
+    proto.activation = CombatActivation::from_i32(ev.is_activation as i32)
+        .unwrap_or(CombatActivation::CA_UNPARSED);
+    proto.buffremove =
+        BuffRemoveType::from_i32(ev.is_buffremove as i32).unwrap_or(BuffRemoveType::BR_Unparsed);
+    proto.src_hp_over_90 = ev.is_ninety > 0;
+    proto.dst_hp_over_50 = ev.is_fifty > 0;
+    proto.src_is_moving = ev.is_moving > 0;
+    proto.statechange =
+        StateChange::from_i32(ev.is_statechange as i32).unwrap_or(StateChange::SC_UNPARSED);
+    proto.is_flanking = ev.is_flanking > 0;
+    proto.is_offcycle = ev.is_offcycle as u32;
+    proto.pad61 = ev.pad61 as u32;
+    proto.pad62 = ev.pad62 as u32;
+    proto.pad63 = ev.pad63 as u32;
+    proto.pad64 = ev.pad64 as u32;
+
+    proto.EventType = EventType::StateChanged;
+
+    match proto.statechange {
+        // log start / end
+        //  value = server unix timestamp **uint32**.
+        //  buff_dmg = local unix timestamp.
+        //  src_agent = 0x637261 (arcdps id) if evtc, species id if realtime
+        StateChange::LOGSTART | StateChange::LOGEND => {}
+        // src_agent swapped weapon set.
+        //  dst_agent = current set id (0/1 water, 4/5 land)
+        StateChange::WEAPSWAP => {
+            proto.weapon_set =
+                WeaponSet::from_i32((ev.dst_agent+1) as i32).unwrap_or(WeaponSet::WS_Unparsed);
+        }
+        // these are the wiggly boxes that you get
+        //  src_agent is self,
+        //  dst_agent is reward id,
+        //  value is reward type.
+        StateChange::REWARD => {
+            proto.reward_id = ev.dst_agent as u32;
+            proto.reward_type = ev.value as u32;
+        }
+        // src_agent change, dst_agent new team id
+        StateChange::TEAMCHANGE => {
+            proto.new_team_id = ev.dst_agent as u32;
+        }
+        // src_agent is agent with buff,
+        // value is the duration to reset to (also marks inactive),
+        // pad61- is the stackid
+        StateChange::STACKRESET => {
+            proto.buff_duration = ev.value as i32;
+            proto.buff_stackid = ev.pad61 as u32;
+        }
+        // src_agent is agent,
+        // dst_agent through buff_dmg is 16 byte guid (client form, needs minor rearrange for api form)
+        StateChange::GUILD => {}
+        // src_agent is agent, value is the id (volatile, game build dependent) of the tag
+        StateChange::TAG => {
+            proto.tag_id = ev.value as u32;
+        }
+
+        _ => {
+            proto.EventType = EventType::Activation;
+            match proto.activation {
+                CombatActivation::START => {}
+                CombatActivation::CANCEL_FIRE | CombatActivation::CANCEL_CANCEL => {
+                    proto.time_in_animation = ev.value as u32;
+                    proto.time_in_animation_scaled = ev.buff_dmg as u32;
+                }
+                CombatActivation::RESET | CombatActivation::QUICKNESS_UNUSED => {
+                    proto.time_in_animation = ev.value as u32;
+                    proto.time_in_animation_scaled = ev.buff_dmg as u32;
+                }
+                _ => {
+                    // This seems to always be 1
+                    // proto.buff_type = BuffType::from_i32(ev.buff as i32).unwrap_or(BuffType::BT_UNPARSED);
+                    proto.EventType = EventType::BuffRemoved;
+                    match proto.buffremove {
+                        BuffRemoveType::All | BuffRemoveType::Single | BuffRemoveType::Manual  => {
+                            proto.buff_duration = ev.value as i32;
+                            proto.buff_stacks_removed = ev.result as i32;
+
+                        }
+                        _ => {
+                            if ev.buff > 0 && ev.value > 0 && ev.buff_dmg == 0 {
+                                proto.EventType = EventType::BuffApplied;
+                                proto.buff_duration = ev.value as i32;
+                                proto.buff_added_active = ev.is_shields > 0;
+                                // if is_offcycle is zero, overstack_value will be duration of the stack that is expected to be removed.
+                                // if is_offcycle is non-zero, overstack_value will be the new duration of the stack, value will be duration change.
+                            } else {
+                                if ev.buff_dmg > 0 && ev.value == 0 {
+                                    proto.EventType = EventType::BuffDamage;
+                                    proto.damage = ev.buff_dmg;
+                                    proto.buff_damage_result = BuffDamageResult::from_i32((ev.result+1) as i32)
+                                        .unwrap_or(BuffDamageResult::BD_Unparsed);
+                                } else {
+                                    proto.EventType = EventType::DirectDamage;
+                                    proto.damage = ev.value;
+                                    proto.target_downed = ev.is_offcycle == 1;
+                                    proto.result = CombatResult::from_i32(ev.result as i32)
+                                        .unwrap_or(CombatResult::CR_Unparsed);
+                                }
+                            }
+                        }
+                }},
+            }
+        }
+    }
+    return proto;
 }

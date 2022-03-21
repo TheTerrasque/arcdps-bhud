@@ -14,7 +14,8 @@ pub fn setup() {
 }
 
 pub async fn dispatch(data: Vec<u8>) {
-    let data = [&data.len().to_le_bytes(), &data[..]].concat();
+    let len = data.len() as u32;
+    let data = [&len.to_le_bytes(), &data[..]].concat();
     let data = &data[..];
     let mut streams = STREAMS.lock().await;
     let mut to_remove = Vec::new();
@@ -48,7 +49,7 @@ async fn setup_pubsub() -> Result<(), std::io::Error> {
 
     // Create a listener.
     let listener =
-        Async::<TcpListener>::bind(format!("127.0.0.1:{}", get_port(std::process::id())))?;
+        Async::<TcpListener>::bind("127.0.0.1:12112")?;
 
     // Accept clients in a loop.
     loop {
@@ -63,8 +64,4 @@ async fn setup_pubsub() -> Result<(), std::io::Error> {
         }
     }
     Ok(())
-}
-
-fn get_port(pid: u32) -> u16 {
-    pid as u16 | 1 << 14 | 1 << 15
 }
